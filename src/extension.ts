@@ -154,13 +154,9 @@ async function handleGenerate(
     panel.webview.postMessage({ command: 'progress', text: 'Extracting Git diffs & branch activity...' });
 
     const currentBranch = await runGit("branch --show-current") || "main";
-    const allBranches = await runGit("branch --format='%(refname:short)'");
-    const branchList = allBranches ? allBranches.split('\n').map(b => b.trim()).filter(Boolean) : [currentBranch];
+    const allBranchesRaw = await runGit("branch --sort=-committerdate --format='%(refname:short)'");
+    const branchList = allBranchesRaw ? allBranchesRaw.split('\n').map(b => b.trim()).filter(Boolean) : [currentBranch];
     
-    // Extract exact ticket ID e.g. "feature/IR-4102" -> "IR-4102"
-    const match = currentBranch.match(/([A-Z]+-\d+)/i);
-    const ticketId = match ? match[0].toUpperCase() : (currentBranch.split('/').pop() || currentBranch);
-
     // Filter out lockfiles and build outputs
     const excludeSpecs = "':!package-lock.json' ':!yarn.lock' ':!pnpm-lock.yaml' ':!*.map' ':!dist/*' ':!out/*' ':!node_modules/*'";
 
@@ -170,31 +166,58 @@ async function handleGenerate(
     const tfConfig = getTimeframeGitOption(timeframeWindow);
     let timeframeLabel = tfConfig.label;
 
-    // Extract committed changes (Done) using selected timeframe
-    let gitLog = await runGit(`log --since="${tfConfig.gitSince}" --all --format="COMMIT||%H||%an||%cd||%s" --stat -p -- . ${excludeSpecs}`);
+    // Extract committed changes across ALL branches (Done) using selected timeframe
+    let gitLog = await runGit(`log --since="${tfConfig.gitSince}" --all --format="COMMIT||%H||%d||%an||%cd||%s" --stat -p -- . ${excludeSpecs}`);
     if (!gitLog && timeframeWindow === 'today') {
       // Fallback if today has no commits
-      gitLog = await runGit(`log --since="24 hours ago" --all --format="COMMIT||%H||%an||%cd||%s" --stat -p -- . ${excludeSpecs}`);
+      gitLog = await runGit(`log --since="24 hours ago" --all --format="COMMIT||%H||%d||%an||%cd||%s" --stat -p -- . ${excludeSpecs}`);
       timeframeLabel = `Last 24 Hours (Fallback)`;
     }
     if (!gitLog) {
-      gitLog = await runGit(`log -n 5 --all --format="COMMIT||%H||%an||%cd||%s" --stat -p -- . ${excludeSpecs}`);
+      gitLog = await runGit(`log -n 5 --all --format="COMMIT||%H||%d||%an||%cd||%s" --stat -p -- . ${excludeSpecs}`);
       timeframeLabel += ` (Fallback to Recent Commits)`;
     }
 
-    // Extract in-progress changes (Staged & Unstaged)
+    // Extract in-progress changes (Staged & Unstaged on active branch)
     const stagedDiff = await runGit(`diff --cached --stat -p -- . ${excludeSpecs}`);
     const unstagedDiff = await runGit(`diff --stat -p -- . ${excludeSpecs}`);
 
-    let gitData = `TIMEFRAME CONSIDERED: ${timeframeLabel}\nDATE: ${dateStr}\n`;
-    gitData += `CURRENT ACTIVE BRANCH: ${currentBranch}\nTICKET ID: ${ticketId}\nALL REPOSITORY BRANCHES: ${branchList.join(', ')}\n\n`;
+    // Detect all ticket numbers or branch names active in this timeframe
+    const detectedTickets = new Set<string>();
+    const currentMatch = currentBranch.match(/([A-Z]+-\d+)/i);
+    if (currentMatch) {
+      detectedTickets.add(currentMatch[0].toUpperCase());
+    } else if (currentBranch !== 'main' && currentBranch !== 'master') {
+      detectedTickets.add(currentBranch);
+    }
 
     if (gitLog) {
-      gitData += `=== COMPLETED TASKS (STATUS: DONE - COMMITTED CHANGES) ===\n${gitLog}\n\n`;
+      const ticketMatches = gitLog.match(/([A-Z]+-\d+)/gi);
+      if (ticketMatches) {
+        ticketMatches.forEach(t => detectedTickets.add(t.toUpperCase()));
+      }
+    }
+
+    branchList.forEach(b => {
+      const m = b.match(/([A-Z]+-\d+)/i);
+      if (m) detectedTickets.add(m[0].toUpperCase());
+    });
+
+    const ticketsSummary = Array.from(detectedTickets).length > 0 
+      ? Array.from(detectedTickets).join(', ') 
+      : (currentBranch.split('/').pop() || currentBranch);
+
+    let gitData = `TIMEFRAME CONSIDERED: ${timeframeLabel}\nDATE: ${dateStr}\n`;
+    gitData += `CURRENT ACTIVE BRANCH (UNCOMMITTED CHANGES): ${currentBranch}\n`;
+    gitData += `DETECTED WORKED TICKETS / BRANCHES IN TIMEFRAME: ${ticketsSummary}\n`;
+    gitData += `ALL REPOSITORY BRANCHES: ${branchList.join(', ')}\n\n`;
+
+    if (gitLog) {
+      gitData += `=== COMPLETED TASKS ACROSS ALL BRANCHES (STATUS: DONE - COMMITTED CHANGES) ===\n${gitLog}\n\n`;
     }
 
     if (stagedDiff || unstagedDiff) {
-      gitData += `=== IN-PROGRESS TASKS (STATUS: CURRENTLY WORKING ON - UNCOMMITTED CHANGES) ===\n`;
+      gitData += `=== IN-PROGRESS TASKS ON ACTIVE BRANCH (${currentBranch}) (STATUS: CURRENTLY WORKING ON - UNCOMMITTED CHANGES) ===\n`;
       if (stagedDiff) gitData += `--- Staged Changes (Ready to commit) ---\n${stagedDiff}\n`;
       if (unstagedDiff) gitData += `--- Unstaged Working Directory Changes ---\n${unstagedDiff}\n`;
     }
@@ -203,49 +226,58 @@ async function handleGenerate(
       throw new Error(`No commits or changes found in Git repository at "${folderPath}" for selected timeframe (${timeframeLabel}).`);
     }
 
-    // Limit payload length safely to 3,500 characters so diff details are included without overloading
-    if (gitData.length > 3500) {
-      gitData = gitData.substring(0, 3500) + "\n\n...[Diff details truncated for fast AI processing]...";
+    // Limit payload length safely to 6,000 characters so multi-branch diff details are included without overloading
+    if (gitData.length > 6000) {
+      gitData = gitData.substring(0, 6000) + "\n\n...[Diff details truncated for fast AI processing]...";
     }
 
     const prompt = `
-Analyze the following Git commits, branch activity, and code diffs for the workday.
+Analyze the following Git commits across ALL branches, branch activity, and code diffs for the specified timeframe.
 Generate a professional ${hoursFormatted}-hour daily timesheet worklog.
 
 METADATA & TIMEFRAME CONSIDERED:
 - Date: ${dateStr}
 - Timeframe Considered: ${timeframeLabel}
-- Active Branch / Ticket ID: ${ticketId}
+- Current Active Branch (Uncommitted changes): ${currentBranch}
+- Detected Worked Tickets / Branches: ${ticketsSummary}
 
 CRITICAL MANDATORY RULES:
-1. **Ticket Number:** MUST be EXACTLY "${ticketId}". Do NOT add any slash, suffix, or extra text after "${ticketId}".
-2. **Task Status Classification**:
-   - For committed changes, set **Task Status:** Done
-   - For staged/unstaged changes, set **Task Status:** Currently Working On
-3. **Time Allocation:** Total cumulative hours across all tasks MUST equal EXACTLY ${hoursFormatted} Hours.
-4. **Work Details:** Provide 3-4 professional, concise English bullet points per ticket detailing business value and specific code logic implemented. No raw code blocks.
+1. **Multi-Branch & Multi-Ticket Support**:
+   - Inspect ALL commits in the Git log across all branches worked on within this timeframe.
+   - Create a separate worklog section for EACH ticket number (e.g. IR-4102, PROJ-101) or branch worked on during this timeframe.
+   - For committed changes on a branch, classify **Task Status:** Done.
+   - For staged/unstaged changes on the current active branch, classify **Task Status:** Currently Working On.
+2. **Time Allocation**:
+   - Divide and allocate hours across all tickets/branches worked on during this timeframe.
+   - Total cumulative hours across ALL tickets MUST equal EXACTLY ${hoursFormatted} Hours.
+3. **Work Details**:
+   - Provide 3-4 professional, concise English bullet points per ticket detailing business value and specific code logic implemented. No raw code blocks.
 
 Format:
 **Date:** ${dateStr}
 **Timeframe Considered:** ${timeframeLabel}
 
+[Repeat the block below for EACH ticket / branch worked on during this timeframe]:
+---
 **Ticket Number:** 
-${ticketId}
+[Ticket ID or Branch Name, e.g. IR-4102]
 
 **Task Status:** 
 [Done / Currently Working On]
 
 **Time Logged:** 
-[Calculated Hours] hours
+[Calculated Hours for this ticket, e.g. 4.5] hours
 
 **Work Details:**
-* [Bullet 1]
-* [Bullet 2]
-* [Bullet 3]
+* [Bullet 1 describing work done for this ticket]
+* [Bullet 2 detailing business value / logic]
+* [Bullet 3 detailing code changes]
+
+---
 
 **Total Cumulative Time Logged:** ${hoursFormatted} Hours
 
-Git Activity & Code Diffs:
+Git Activity & Code Diffs Across All Branches:
 \`\`\`
 ${gitData}
 \`\`\`
