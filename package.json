@@ -1,0 +1,51 @@
+{
+  "name": "ai-timesheet-editor",
+  "displayName": "AI Timesheet Editor",
+  "description": "Automates daily timesheet generation from Git diffs using Gemini AI.",
+  "version": "1.0.0",
+  "publisher": "antigravity",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ai-timesheet-editor.open",
+        "title": "AI Timesheet Editor: Generate Worklog",
+        "icon": "$(calendar)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "ai-timesheet-editor.open",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "ai-timesheet-editor.open"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "npm run compile && node build-package.js",
+    "build": "npm run compile && node build-package.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "^18.x",
+    "typescript": "^5.x"
+  }
+}

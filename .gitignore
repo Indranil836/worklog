@@ -1,0 +1,13 @@
+# Dependencies
+node_modules/
+
+# Temporary Build Scratch Folders
+.vsix-build/
+
+# Logs & System Files
+*.log
+.DS_Store
+
+# Test & IDE Folders
+.vscode-test/
+.gemini/
